@@ -785,7 +785,7 @@ func (di *defaultIplementation) ProcessChainedSubjects(
 		attestations, ids, defaultEvalClass,
 	)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, fail, err
 	}
 
 	if len(subjects) > 1 {
