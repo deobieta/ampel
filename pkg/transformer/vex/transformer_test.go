@@ -57,7 +57,7 @@ func TestApplyVEX(t *testing.T) {
 				Digest: map[string]string{
 					gointoto.AlgorithmSHA256.String(): "9579c854c652497e48a7bfc278149b12bdd0e3c2189f0c3b42bda4366cf9b15d",
 				},
-			}, &results, vexPathsToPredicates(t, tc.vexes))
+			}, &results, nil, vexPathsToPredicates(t, tc.vexes))
 			require.NoError(t, err)
 
 			require.NotNil(t, res)

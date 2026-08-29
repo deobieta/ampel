@@ -46,7 +46,7 @@ func (t *Transformer) Init(_ *structpb.Struct) error {
 // Mutate applies the VEX documents in the input to the received
 // vulnerability reports.
 func (t *Transformer) Mutate(subj attestation.Subject, inputs []attestation.Predicate) (attestation.Subject, []attestation.Predicate, error) {
-	results, vexes, err := t.classifyAttestations(inputs)
+	results, osvPred, vexes, err := t.classifyAttestations(inputs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("classifying attestations: %w", err)
 	}
@@ -61,33 +61,44 @@ func (t *Transformer) Mutate(subj attestation.Subject, inputs []attestation.Pred
 	logrus.Debugf("VEX transformer: Got %d inputs, got results + %d vex documents", len(inputs), len(vexes))
 
 	// Apply any VEX to documents received to the vulnerability report
-	pred, err := t.ApplyVEX(subj, results, vexes)
+	pred, err := t.ApplyVEX(subj, results, osvPred, vexes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("performing VEX mutation: %w", err)
 	}
 	return subj, []attestation.Predicate{pred}, nil
 }
 
-// classifyAttestations orders the received predictaes and separates the OSV
-// results from the VEX data.
-func (t *Transformer) classifyAttestations(predicates []attestation.Predicate) (*osv.Results, []attestation.Predicate, error) {
+// classifyAttestations orders the received predicates and separates the OSV
+// results from the VEX data. It also returns the original OSV predicate so
+// callers can preserve its type in the synthesized output.
+func (t *Transformer) classifyAttestations(predicates []attestation.Predicate) (*osv.Results, attestation.Predicate, []attestation.Predicate, error) {
 	var report *osv.Results
+	var osvPredicate attestation.Predicate
 	var vexes []attestation.Predicate
 
 	for _, p := range predicates {
 		// Check if we got the vulnerability report
 		if strings.HasPrefix(string(p.GetType()), "https://ossf.github.io/osv-schema/results") {
 			if report != nil {
-				return nil, nil, errors.New("more than one vulnerability report found in predicates")
+				return nil, nil, nil, errors.New("more than one vulnerability report found in predicates")
 			}
 
 			// Ensure we can cast the report
 			t, ok := p.GetParsed().(*osv.Results)
 			if ok {
 				report = t
+				osvPredicate = p
 				continue
-			} else {
-				logrus.Debugf("found OSV predicate but could not find results (got %T)", p.GetParsed())
+			}
+
+			// The predicate parser may not have recognized the OSV type (e.g. the
+			// legacy @v1.6.7 type lands as a DataMap). Fall back to parsing from
+			// raw bytes so VEX suppression still works.
+			logrus.Debugf("found OSV predicate but could not find results (got %T), re-parsing from raw data", p.GetParsed())
+			if rawReport, perr := osv.NewParser().ParseResults(p.GetData()); perr == nil && rawReport != nil {
+				report = rawReport
+				osvPredicate = p
+				continue
 			}
 		}
 
@@ -97,7 +108,7 @@ func (t *Transformer) classifyAttestations(predicates []attestation.Predicate) (
 		}
 	}
 
-	return report, vexes, nil
+	return report, osvPredicate, vexes, nil
 }
 
 func hashToHash(intotoHash string) string {
@@ -149,9 +160,10 @@ func normalizeVulnIds(record *osv.Record) (main openvex.VulnerabilityID, aliases
 }
 
 // ApplyVEX applies a group of OpenVEX predicates to the vuln report
-// and returns the vexed report
+// and returns the vexed report. osvPredicate is the original OSV predicate;
+// its type is preserved in the output so downstream tenet type filters work.
 func (t *Transformer) ApplyVEX(
-	subj attestation.Subject, report *osv.Results, vexes []attestation.Predicate,
+	subj attestation.Subject, report *osv.Results, osvPredicate attestation.Predicate, vexes []attestation.Predicate,
 ) (attestation.Predicate, error) {
 	if report == nil {
 		return nil, fmt.Errorf("no vulnerability report found")
@@ -324,8 +336,15 @@ func (t *Transformer) ApplyVEX(
 	descr[0].Name = "synhetic_report_with_vex_applied"
 	descr[0].Uri = "internal:vex"
 
+	// Preserve the original predicate type so downstream tenet type filters
+	// continue to match (e.g. @v1.6.7 policies still see @v1.6.7 output).
+	outType := aosv.PredicateType
+	if osvPredicate != nil {
+		outType = osvPredicate.GetType()
+	}
+
 	return &generic.Predicate{
-		Type:   aosv.PredicateType,
+		Type:   outType,
 		Parsed: newReport,
 		Data:   data,
 		Source: descr[0],
